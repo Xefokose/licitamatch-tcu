@@ -6,6 +6,7 @@ import pdfplumber
 import docx
 import io
 import os
+import re
 
 # Configuração da Página
 st.set_page_config(page_title="LicitaMatch TCU", page_icon="⚖️", layout="wide")
@@ -18,7 +19,7 @@ st.markdown("""
     os acórdãos do TCU semanticamente compatíveis.
 """)
 
-# Cache do Modelo de IA (Para não recarregar toda vez)
+# Cache do Modelo de IA
 @st.cache_resource
 def load_model():
     return SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
@@ -26,17 +27,60 @@ def load_model():
 # Cache da Base de Dados
 @st.cache_data
 def load_database():
-    # Tenta carregar a base de conhecimento do próprio repositório
     try:
-        # URL direta do arquivo CSV no seu GitHub (substitua pelo seu usuário se necessário)
-        # Para simplificar, vamos ler localmente se existir, ou baixar um sample
         if os.path.exists('base_tcu.csv'):
-            df = pd.read_csv('base_tcu.csv')
+            # Tenta ler com pipe primeiro (formato do seu arquivo)
+            try:
+                df = pd.read_csv('base_tcu.csv', sep='|', engine='python', encoding='utf-8')
+            except:
+                # Tenta ler com vírgula
+                df = pd.read_csv('base_tcu.csv', sep=',', engine='python', encoding='utf-8')
+            
+            # Limpeza automática dos dados
+            df = limpar_dados_tcu(df)
             return df
         else:
             return None
-    except:
+    except Exception as e:
+        st.error(f"Erro ao carregar base: {str(e)}")
         return None
+
+# Função para limpar e organizar os dados do TCU
+def limpar_dados_tcu(df):
+    # Mapeia as colunas do seu formato específico
+    coluna_map = {
+        'INFORMATIVO-LC': 'id',
+        'Informativo de Licitações': 'titulo',
+        'Plenário': 'colegiado',
+        'Acórdão': 'acordao',
+        'Nos contratos': 'ementa'
+    }
+    
+    # Renomeia colunas baseado no conteúdo
+    novas_colunas = []
+    for col in df.columns:
+        if 'INFORMATIVO' in str(col).upper():
+            novas_colunas.append('id')
+        elif 'LICITA'' in str(col).upper():
+            novas_colunas.append('titulo')
+        elif 'PLEN' in str(col).upper() or 'CÂMARA' in str(col).upper():
+            novas_colunas.append('colegiado')
+        elif 'ACÓRDÃO' in str(col).upper() or 'numero' in str(col).lower():
+            novas_colunas.append('numero_acordao')
+        elif 'EMENTA' in str(col).upper() or 'contratos' in str(col).lower():
+            novas_colunas.append('ementa')
+        else:
+            novas_colunas.append(f'col_{len(novas_colunas)}')
+    
+    df.columns = novas_colunas[:len(df.columns)]
+    
+    # Remove tags HTML/XML
+    if 'ementa' in df.columns:
+        df['ementa'] = df['ementa'].astype(str).apply(lambda x: re.sub(r'<[^>]+>', '', x))
+    if 'numero_acordao' in df.columns:
+        df['numero_acordao'] = df['numero_acordao'].astype(str).apply(lambda x: re.sub(r'<[^>]+>', '', x))
+    
+    return df
 
 # Função para extrair texto de PDF
 def extract_text_from_pdf(file):
@@ -56,9 +100,13 @@ def search_jurisprudence(query_text, df, model, top_k=5):
     if df is None or df.empty:
         return []
     
+    # Identifica colunas disponíveis
+    col_ementa = 'ementa' if 'ementa' in df.columns else df.columns[0]
+    col_numero = 'numero_acordao' if 'numero_acordao' in df.columns else 'id'
+    
     # Limpeza
-    df = df.dropna(subset=['ementa', 'texto_decisao'])
-    textos_base = (df['ementa'].astype(str) + " " + df['texto_decisao'].astype(str)).tolist()
+    df = df.dropna(subset=[col_ementa])
+    textos_base = df[col_ementa].astype(str).tolist()
     
     # Vetorização
     query_embedding = model.encode(query_text, convert_to_tensor=True)
@@ -73,23 +121,35 @@ def search_jurisprudence(query_text, df, model, top_k=5):
         idx = idx.item()
         resultados.append({
             "score": f"{score.item()*100:.2f}%",
-            "ementa": df.iloc[idx]['ementa'],
-            "decisao": df.iloc[idx]['texto_decisao'][:300] + "...",
-            "numero": df.iloc[idx].get('numero_acordao', 'N/A')
+            "ementa": df.iloc[idx][col_ementa][:500],
+            "numero": df.iloc[idx].get(col_numero, 'N/A'),
+            "colegiado": df.iloc[idx].get('colegiado', 'N/A')
         })
     return resultados
 
 # --- INTERFACE DO USUÁRIO ---
 
-# Sidebar para Upload de Base (Caso queira atualizar)
+# Sidebar
 with st.sidebar:
     st.header("🗄️ Gestão de Dados")
-    uploaded_db = st.file_uploader("Atualizar Base de Acórdãos (CSV)", type=['csv'])
+    uploaded_db = st.file_uploader("Upload da Base TCU (CSV)", type=['csv', 'txt'])
     if uploaded_db:
-        df_temp = pd.read_csv(uploaded_db)
-        df_temp.to_csv('base_tcu.csv', index=False)
-        st.success("Base atualizada com sucesso! Recarregue a página.")
-        st.cache_data.clear()
+        try:
+            # Detecta automaticamente o delimitador
+            content = uploaded_db.read().decode('utf-8')
+            if '|' in content:
+                df_temp = pd.read_csv(io.StringIO(content), sep='|', engine='python')
+            else:
+                df_temp = pd.read_csv(io.StringIO(content), sep=',', engine='python')
+            
+            df_temp = limpar_dados_tcu(df_temp)
+            df_temp.to_csv('base_tcu.csv', index=False)
+            st.success("✅ Base atualizada! Recarregue a página (F5).")
+            st.cache_data.clear()
+        except Exception as e:
+            st.error(f"❌ Erro: {str(e)}")
+    
+    st.info("📊 Seu arquivo `boletim-informativo-lc.csv` é compatível!")
 
 # Área Principal
 col1, col2 = st.columns([1, 1])
@@ -106,36 +166,32 @@ with col1:
             texto_peca = extract_text_from_docx(uploaded_file)
         
         st.info(f"📄 Texto extraído: {len(texto_peca)} caracteres")
-        
-        # Permitir edição manual caso a extração falhe
-        texto_final = st.text_area("Edite o texto se necessário (Foque nos argumentos jurídicos):", value=texto_peca, height=200)
+        texto_final = st.text_area("Edite o texto se necessário:", value=texto_peca, height=200)
 
 with col2:
     st.subheader("🔍 2. Resultados Sugeridos")
     if st.button("🚀 Analisar Compatibilidade"):
-        if not texto_final:
-            st.warning("Por favor, faça o upload de um arquivo ou digite o texto.")
+        if 'texto_final' not in locals() or not texto_final:
+            st.warning("Por favor, faça o upload de um arquivo.")
         else:
-            with st.spinner("A IA está lendo o TCU..."):
+            with st.spinner("🤖 A IA está analisando a jurisprudência do TCU..."):
                 model = load_model()
                 df = load_database()
                 
-                # Se não houver base, avisa
                 if df is None:
-                    st.error("⚠️ Base de dados não encontrada. Use a barra lateral para subir um CSV de acórdãos.")
+                    st.error("⚠️ Base não encontrada. Use a barra lateral para upload.")
                 else:
                     resultados = search_jurisprudence(texto_final, df, model)
                     
                     if resultados:
-                        st.success("Análise Concluída!")
+                        st.success("✅ Análise Concluída!")
                         for res in resultados:
-                            with st.expander(f"🏛️ Compatibilidade: {res['score']} - Acórdão {res['numero']}"):
+                            with st.expander(f"🏛️ {res['score']} - Acórdão {res['numero']}"):
                                 st.markdown(f"**Ementa:** {res['ementa']}")
-                                st.markdown(f"**Trecho da Decisão:** {res['decisao']}")
-                                st.code(f"Cite como: TCU, Acórdão {res['numero']}, Rel. Min. [Nome], {res['ementa'][:50]}...")
+                                st.markdown(f"**Colegiado:** {res['colegiado']}")
+                                st.code(f"Sugestão de citação: TCU, Acórdão {res['numero']}, {res['colegiado']}")
                     else:
-                        st.warning("Nenhum acórdão compatível encontrado na base atual.")
+                        st.warning("Nenhum acórdão compatível encontrado.")
 
-# Rodapé
 st.markdown("---")
-st.caption("Sistema desenvolvido para uso jurídico. Sempre verifique a vigência da jurisprudência.")
+st.caption("Sistema desenvolvido para uso jurídico interno. Sempre verifique a vigência da jurisprudência.")
