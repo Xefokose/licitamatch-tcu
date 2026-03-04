@@ -47,38 +47,31 @@ def load_database():
 
 # Função para limpar e organizar os dados do TCU
 def limpar_dados_tcu(df):
-    # Mapeia as colunas do seu formato específico
-    coluna_map = {
-        'INFORMATIVO-LC': 'id',
-        'Informativo de Licitações': 'titulo',
-        'Plenário': 'colegiado',
-        'Acórdão': 'acordao',
-        'Nos contratos': 'ementa'
-    }
-    
-    # Renomeia colunas baseado no conteúdo
+    # Mapeia as colunas baseado no conteúdo do seu arquivo
     novas_colunas = []
     for col in df.columns:
-        if 'INFORMATIVO' in str(col).upper():
+        col_upper = str(col).upper()
+        if 'INFORMATIVO' in col_upper:
             novas_colunas.append('id')
-        elif 'LICITA'' in str(col).upper():
+        elif 'LICITACAO' in col_upper or 'LICITAÇÃO' in col_upper or 'LICITA' in col_upper:
             novas_colunas.append('titulo')
-        elif 'PLEN' in str(col).upper() or 'CÂMARA' in str(col).upper():
+        elif 'PLEN' in col_upper or 'CAMARA' in col_upper or 'CÂMARA' in col_upper:
             novas_colunas.append('colegiado')
-        elif 'ACÓRDÃO' in str(col).upper() or 'numero' in str(col).lower():
+        elif 'ACÓRDÃO' in col_upper or 'ACORDAO' in col_upper or 'numero' in str(col).lower():
             novas_colunas.append('numero_acordao')
-        elif 'EMENTA' in str(col).upper() or 'contratos' in str(col).lower():
+        elif 'EMENTA' in col_upper or 'CONTRATOS' in col_upper or col_upper.count('""') > 0:
             novas_colunas.append('ementa')
         else:
             novas_colunas.append(f'col_{len(novas_colunas)}')
     
-    df.columns = novas_colunas[:len(df.columns)]
+    # Aplica os novos nomes (limitando ao número de colunas existentes)
+    if len(novas_colunas) >= len(df.columns):
+        df.columns = novas_colunas[:len(df.columns)]
     
-    # Remove tags HTML/XML
-    if 'ementa' in df.columns:
-        df['ementa'] = df['ementa'].astype(str).apply(lambda x: re.sub(r'<[^>]+>', '', x))
-    if 'numero_acordao' in df.columns:
-        df['numero_acordao'] = df['numero_acordao'].astype(str).apply(lambda x: re.sub(r'<[^>]+>', '', x))
+    # Remove tags HTML/XML das colunas de texto
+    for col in df.columns:
+        if col in ['ementa', 'titulo', 'numero_acordao']:
+            df[col] = df[col].astype(str).apply(lambda x: re.sub(r'<[^>]+>', '', x) if pd.notna(x) else '')
     
     return df
 
